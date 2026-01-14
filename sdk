@@ -1,0 +1,261 @@
+# sudoku_generator.py
+# Python 3.10+ 推奨
+# 使い方:
+#   python sudoku_generator.py --clues 28 --seed 42
+# 出力:
+#   puzzle (0=空) と solution を表示
+
+from __future__ import annotations
+import random
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+Grid = List[List[int]]
+
+def print_grid(g: Grid) -> None:
+    for r in range(9):
+        if r % 3 == 0 and r != 0:
+            print("-" * 21)
+        row = []
+        for c in range(9):
+            if c % 3 == 0 and c != 0:
+                row.append("|")
+            v = g[r][c]
+            row.append(str(v) if v != 0 else ".")
+        print(" ".join(row))
+
+# -----------------------------
+# 1) 完成盤面の生成（基本型 + 対称操作）
+# -----------------------------
+def generate_full_grid(rng: random.Random) -> Grid:
+    # ベースパターン（合法な完成形）
+    base = [
+        [1,2,3,4,5,6,7,8,9],
+        [4,5,6,7,8,9,1,2,3],
+        [7,8,9,1,2,3,4,5,6],
+        [2,3,4,5,6,7,8,9,1],
+        [5,6,7,8,9,1,2,3,4],
+        [8,9,1,2,3,4,5,6,7],
+        [3,4,5,6,7,8,9,1,2],
+        [6,7,8,9,1,2,3,4,5],
+        [9,1,2,3,4,5,6,7,8],
+    ]
+
+    # 数字置換
+    digits = list(range(1, 10))
+    rng.shuffle(digits)
+    mp = {i+1: digits[i] for i in range(9)}
+    g = [[mp[v] for v in row] for row in base]
+
+    # 行ブロック(3行)のシャッフル、ブロック内行のシャッフル
+    def shuffled_rows():
+        blocks = [0,1,2]
+        rng.shuffle(blocks)
+        rows = []
+        for b in blocks:
+            inner = [0,1,2]
+            rng.shuffle(inner)
+            for i in inner:
+                rows.append(b*3 + i)
+        return rows
+
+    # 列も同様
+    def shuffled_cols():
+        blocks = [0,1,2]
+        rng.shuffle(blocks)
+        cols = []
+        for b in blocks:
+            inner = [0,1,2]
+            rng.shuffle(inner)
+            for i in inner:
+                cols.append(b*3 + i)
+        return cols
+
+    rr = shuffled_rows()
+    cc = shuffled_cols()
+    g = [[g[r][c] for c in cc] for r in rr]
+
+    # 転置（50%）
+    if rng.random() < 0.5:
+        g = [list(row) for row in zip(*g)]
+
+    return g
+
+# -----------------------------
+# 2) ソルバ（候補最少のマスから埋める + 解の個数を最大2まで数える）
+# -----------------------------
+ALL_MASK = (1 << 9) - 1  # 9 bits
+
+def bit_to_vals(mask: int) -> List[int]:
+    return [i+1 for i in range(9) if (mask >> i) & 1]
+
+def popcount(x: int) -> int:
+    return x.bit_count()
+
+@dataclass
+class SudokuState:
+    grid: Grid
+    row_mask: List[int]
+    col_mask: List[int]
+    box_mask: List[int]
+
+def box_id(r: int, c: int) -> int:
+    return (r // 3) * 3 + (c // 3)
+
+def init_state(grid: Grid) -> Optional[SudokuState]:
+    row = [ALL_MASK] * 9
+    col = [ALL_MASK] * 9
+    box = [ALL_MASK] * 9
+    for r in range(9):
+        for c in range(9):
+            v = grid[r][c]
+            if v == 0:
+                continue
+            b = box_id(r, c)
+            bit = 1 << (v - 1)
+            if (row[r] & bit) == 0 or (col[c] & bit) == 0 or (box[b] & bit) == 0:
+                return None
+            row[r] ^= bit
+            col[c] ^= bit
+            box[b] ^= bit
+    return SudokuState([row[:] for row in grid], row, col, box)
+
+def find_best_cell(st: SudokuState) -> Tuple[int, int, int]:
+    # (r, c, candidates_mask); if solved -> (-1,-1,0)
+    best = (10, -1, -1, 0)  # (num_cand, r, c, mask)
+    for r in range(9):
+        for c in range(9):
+            if st.grid[r][c] != 0:
+                continue
+            b = box_id(r, c)
+            mask = st.row_mask[r] & st.col_mask[c] & st.box_mask[b]
+            cnt = popcount(mask)
+            if cnt == 0:
+                return (r, c, 0)
+            if cnt < best[0]:
+                best = (cnt, r, c, mask)
+                if cnt == 1:
+                    return (best[1], best[2], best[3])
+    return (best[1], best[2], best[3]) if best[1] != -1 else (-1, -1, 0)
+
+def solve_count(grid: Grid, limit: int = 2) -> Tuple[int, Optional[Grid]]:
+    st0 = init_state(grid)
+    if st0 is None:
+        return 0, None
+
+    solution: Optional[Grid] = None
+    count = 0
+
+    def dfs(st: SudokuState) -> None:
+        nonlocal count, solution
+        if count >= limit:
+            return
+        r, c, mask = find_best_cell(st)
+        if r == -1:
+            count += 1
+            if solution is None:
+                solution = [row[:] for row in st.grid]
+            return
+        if mask == 0:
+            return
+
+        b = box_id(r, c)
+        vals = bit_to_vals(mask)
+        # ランダム性（生成の一意性チェックでも偏りを減らす）
+        # ※速度優先ならシャッフルを外してもOK
+        for v in vals:
+            bit = 1 << (v - 1)
+            if (st.row_mask[r] & bit) == 0:
+                continue
+            # place
+            st.grid[r][c] = v
+            st.row_mask[r] ^= bit
+            st.col_mask[c] ^= bit
+            st.box_mask[b] ^= bit
+
+            dfs(st)
+
+            # undo
+            st.box_mask[b] ^= bit
+            st.col_mask[c] ^= bit
+            st.row_mask[r] ^= bit
+            st.grid[r][c] = 0
+
+            if count >= limit:
+                return
+
+    dfs(st0)
+    return count, solution
+
+# -----------------------------
+# 3) 作問（削りながら一意性チェック）
+# -----------------------------
+def make_puzzle(solution: Grid, rng: random.Random, clues: int = 30, symmetric: bool = True) -> Grid:
+    puzzle = [row[:] for row in solution]
+
+    # 削除順（セルのリスト）
+    cells = [(r, c) for r in range(9) for c in range(9)]
+    rng.shuffle(cells)
+
+    def paired(r: int, c: int) -> Tuple[int, int]:
+        return (8 - r, 8 - c)
+
+    filled = 81
+    for (r, c) in cells:
+        if filled <= clues:
+            break
+        if puzzle[r][c] == 0:
+            continue
+
+        # 対称削りならペアも一緒に
+        to_remove = [(r, c)]
+        if symmetric:
+            pr, pc = paired(r, c)
+            if (pr, pc) != (r, c) and puzzle[pr][pc] != 0:
+                to_remove.append((pr, pc))
+
+        backup = [(rr, cc, puzzle[rr][cc]) for rr, cc in to_remove]
+        for rr, cc, _ in backup:
+            puzzle[rr][cc] = 0
+
+        # 一意性チェック（解が2つ以上なら戻す）
+        cnt, _ = solve_count(puzzle, limit=2)
+        if cnt != 1:
+            for rr, cc, v in backup:
+                puzzle[rr][cc] = v
+        else:
+            filled -= len(backup)
+
+    return puzzle
+
+# -----------------------------
+# CLI
+# -----------------------------
+def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clues", type=int, default=30, help="残すヒント数（目安 22〜35）")
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--no-sym", action="store_true", help="対称削りをオフにする")
+    args = ap.parse_args()
+
+    if not (17 <= args.clues <= 81):
+        raise SystemExit("clues は 17〜81 の範囲にしてください（理論上の最小は 17 ですが実用は 22〜35推奨）")
+
+    rng = random.Random(args.seed)
+
+    sol = generate_full_grid(rng)
+    puzzle = make_puzzle(sol, rng, clues=args.clues, symmetric=not args.no_sym)
+
+    # 念のため最終確認
+    cnt, sol2 = solve_count(puzzle, limit=2)
+    if cnt != 1 or sol2 is None:
+        raise RuntimeError("一意解になっていません（生成に失敗）。seed を変えるなどしてください。")
+
+    print("=== PUZZLE (0=empty) ===")
+    print_grid(puzzle)
+    print("\n=== SOLUTION ===")
+    print_grid(sol2)
+
+if __name__ == "__main__":
+    main()
