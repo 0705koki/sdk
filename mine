@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Minesweeper</title>
+  <style>
+    :root { --cell: 30px; --gap: 4px; }
+    body {
+      margin: 0; padding: 20px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans JP", sans-serif;
+      background: #0b1220; color: #e8eefc;
+      display: grid; place-items: start center;
+    }
+    .wrap { width: min(680px, 100%); }
+    h1 { margin: 0 0 10px; font-size: 18px; font-weight: 700; color: #cfe0ff; }
+    .bar {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      align-items: center; justify-content: space-between;
+      background: #121b30; border: 1px solid #22325a;
+      padding: 10px 12px; border-radius: 12px;
+      margin-bottom: 12px;
+    }
+    .group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button, select {
+      background: #182447; color: #e8eefc;
+      border: 1px solid #2b3d70;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover, select:hover { border-color: #3c58a8; }
+    .pill {
+      background: #182447; border: 1px solid #2b3d70;
+      padding: 8px 10px; border-radius: 999px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+    .hint { opacity: .85; font-size: 12px; margin: 10px 2px 0; }
+
+    .board {
+      display: grid;
+      gap: var(--gap);
+      background: #0f1830;
+      padding: 10px;
+      border-radius: 14px;
+      border: 1px solid #22325a;
+      width: fit-content;
+      max-width: 100%;
+      overflow: auto;
+    }
+    .cell {
+      width: var(--cell); height: var(--cell);
+      display: grid; place-items: center;
+      border-radius: 8px;
+      user-select: none;
+      font-weight: 800;
+      font-size: 14px;
+      border: 1px solid #2b3d70;
+      background: #1b2a52;
+      color: #e8eefc;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .cell:active { transform: translateY(1px); }
+    .cell.revealed {
+      background: #0f1933;
+      border-color: #22325a;
+      cursor: default;
+    }
+    .cell.mine.revealed { background: #3a1130; border-color: #6a2c62; }
+    .cell.flag { background: #2a2148; border-color: #56408b; }
+    .cell.wrong { background: #3b1a1a; border-color: #7a2b2b; }
+
+    .n1{ color:#9ad1ff } .n2{ color:#a8ffb0 } .n3{ color:#ffb3b3 }
+    .n4{ color:#bdb3ff } .n5{ color:#ffd69a } .n6{ color:#9affee }
+    .n7{ color:#c6cbd8 } .n8{ color:#f3f6ff }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>💣 Minesweeper</h1>
+
+    <div class="bar">
+      <div class="group">
+        <label class="pill">⏱ <span id="time">0</span>s</label>
+        <label class="pill">🚩 <span id="flags">0</span>/<span id="mines">0</span></label>
+        <label class="pill">🙂 <span id="status">Ready</span></label>
+      </div>
+
+      <div class="group">
+        <select id="level" title="Difficulty">
+          <option value="beginner">Beginner (9×9, 10)</option>
+          <option value="intermediate" selected>Intermediate (16×16, 40)</option>
+          <option value="expert">Expert (30×16, 99)</option>
+        </select>
+        <button id="new">New Game</button>
+      </div>
+    </div>
+
+    <div id="board" class="board" aria-label="Minesweeper board"></div>
+    <div class="hint">左クリック：開く｜右クリック：旗（🚩）｜0の周りは自動で開きます</div>
+  </div>
+
+<script>
+(() => {
+  const boardEl = document.getElementById("board");
+  const timeEl  = document.getElementById("time");
+  const flagsEl = document.getElementById("flags");
+  const minesEl = document.getElementById("mines");
+  const statusEl= document.getElementById("status");
+  const levelEl = document.getElementById("level");
+  const newBtn  = document.getElementById("new");
+
+  const LEVELS = {
+    beginner:     { w: 9,  h: 9,  m: 10, cell: 32 },
+    intermediate: { w: 16, h: 16, m: 40, cell: 28 },
+    expert:       { w: 30, h: 16, m: 99, cell: 24 },
+  };
+
+  let W=16, H=16, M=40;
+  let grid = [];          // {mine, revealed, flag, adj}
+  let firstClick = true;
+  let revealedCount = 0;
+  let flags = 0;
+  let gameOver = false;
+
+  let timer = null;
+  let t = 0;
+
+  function idx(x,y){ return y*W+x; }
+  function inb(x,y){ return x>=0 && x<W && y>=0 && y<H; }
+  function neighbors(x,y){
+    const res=[];
+    for(let dy=-1; dy<=1; dy++){
+      for(let dx=-1; dx<=1; dx++){
+        if(dx===0 && dy===0) continue;
+        const nx=x+dx, ny=y+dy;
+        if(inb(nx,ny)) res.push([nx,ny]);
+      }
+    }
+    return res;
+  }
+
+  function setUI(){
+    timeEl.textContent = String(t);
+    flagsEl.textContent = String(flags);
+    minesEl.textContent = String(M);
+  }
+
+  function setStatus(s){ statusEl.textContent = s; }
+
+  function stopTimer(){
+    if(timer){ clearInterval(timer); timer=null; }
+  }
+  function startTimer(){
+    if(timer) return;
+    timer = setInterval(()=>{ t++; timeEl.textContent = String(t); }, 1000);
+  }
+
+  function reset(levelKey){
+    const lv = LEVELS[levelKey] || LEVELS.intermediate;
+    W=lv.w; H=lv.h; M=lv.m;
+    document.documentElement.style.setProperty("--cell", `${lv.cell}px`);
+
+    grid = Array.from({length: W*H}, ()=>({ mine:false, revealed:false, flag:false, adj:0 }));
+    firstClick = true;
+    revealedCount = 0;
+    flags = 0;
+    gameOver = false;
+    t = 0;
+    stopTimer();
+    setUI();
+    setStatus("Ready");
+
+    boardEl.style.gridTemplateColumns = `repeat(${W}, var(--cell))`;
+    render();
+  }
+
+  function placeMinesAvoiding(sx, sy){
+    // 最初のクリック位置とその周囲8マスは地雷にしない
+    const banned = new Set([idx(sx,sy)]);
+    for(const [nx,ny] of neighbors(sx,sy)) banned.add(idx(nx,ny));
+
+    const candidates = [];
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const k = idx(x,y);
+        if(!banned.has(k)) candidates.push(k);
+      }
+    }
+
+    // シャッフルして先頭M個を地雷に
+    for(let i=candidates.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+    for(let i=0;i<M;i++){
+      grid[candidates[i]].mine = true;
+    }
+
+    // 隣接地雷数
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const k = idx(x,y);
+        if(grid[k].mine) { grid[k].adj = -1; continue; }
+        let cnt=0;
+        for(const [nx,ny] of neighbors(x,y)){
+          if(grid[idx(nx,ny)].mine) cnt++;
+        }
+        grid[k].adj = cnt;
+      }
+    }
+  }
+
+  function render(){
+    boardEl.innerHTML = "";
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const k = idx(x,y);
+        const c = grid[k];
+
+        const el = document.createElement("div");
+        el.className = "cell";
+        el.dataset.x = String(x);
+        el.dataset.y = String(y);
+
+        if(c.revealed){
+          el.classList.add("revealed");
+          if(c.mine){
+            el.classList.add("mine");
+            el.textContent = "💣";
+          } else if(c.adj > 0){
+            el.textContent = String(c.adj);
+            el.classList.add(`n${Math.min(8,c.adj)}`);
+          } else {
+            el.textContent = "";
+          }
+        } else if(c.flag){
+          el.classList.add("flag");
+          el.textContent = "🚩";
+        } else {
+          el.textContent = "";
+        }
+
+        el.addEventListener("click", onLeftClick);
+        el.addEventListener("contextmenu", onRightClick);
+
+        boardEl.appendChild(el);
+      }
+    }
+  }
+
+  function reveal(x,y){
+    const k = idx(x,y);
+    const c = grid[k];
+    if(c.revealed || c.flag) return;
+
+    c.revealed = true;
+    revealedCount++;
+
+    // 0なら周囲を連鎖オープン（BFS）
+    if(c.adj === 0 && !c.mine){
+      const q = [[x,y]];
+      const seen = new Set([k]);
+      while(q.length){
+        const [cx,cy] = q.shift();
+        for(const [nx,ny] of neighbors(cx,cy)){
+          const nk = idx(nx,ny);
+          if(seen.has(nk)) continue;
+          seen.add(nk);
+          const nc = grid[nk];
+          if(nc.flag || nc.revealed) continue;
+          nc.revealed = true;
+          revealedCount++;
+          if(nc.adj === 0 && !nc.mine){
+            q.push([nx,ny]);
+          }
+        }
+      }
+    }
+  }
+
+  function lose(){
+    gameOver = true;
+    stopTimer();
+    setStatus("Boom");
+
+    // 全地雷を開く + 間違った旗を表示
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const c = grid[idx(x,y)];
+        if(c.mine) c.revealed = true;
+      }
+    }
+    render();
+
+    // 旗の誤りを強調
+    const cells = boardEl.querySelectorAll(".cell");
+    cells.forEach(el=>{
+      const x = Number(el.dataset.x), y = Number(el.dataset.y);
+      const c = grid[idx(x,y)];
+      if(c.flag && !c.mine){
+        el.classList.add("wrong");
+        el.textContent = "❌";
+      }
+    });
+  }
+
+  function win(){
+    gameOver = true;
+    stopTimer();
+    setStatus("Clear");
+
+    // 残り地雷に自動で旗
+    for(let i=0;i<grid.length;i++){
+      if(grid[i].mine && !grid[i].flag){
+        grid[i].flag = true;
+        flags++;
+      }
+    }
+    setUI();
+    render();
+  }
+
+  function checkWin(){
+    // 地雷以外が全部開かれたら勝ち
+    const safe = W*H - M;
+    if(revealedCount >= safe){
+      win();
+    }
+  }
+
+  function onLeftClick(e){
+    if(gameOver) return;
+    const x = Number(e.currentTarget.dataset.x);
+    const y = Number(e.currentTarget.dataset.y);
+
+    if(firstClick){
+      placeMinesAvoiding(x,y);
+      firstClick = false;
+      startTimer();
+      setStatus("Playing");
+    }
+
+    const c = grid[idx(x,y)];
+    if(c.flag || c.revealed) return;
+
+    if(c.mine){
+      // クリックが地雷なら負け
+      c.revealed = true;
+      render();
+      lose();
+      return;
+    }
+
+    reveal(x,y);
+    render();
+    checkWin();
+  }
+
+  function onRightClick(e){
+    e.preventDefault();
+    if(gameOver) return;
+
+    const x = Number(e.currentTarget.dataset.x);
+    const y = Number(e.currentTarget.dataset.y);
+    const c = grid[idx(x,y)];
+    if(c.revealed) return;
+
+    c.flag = !c.flag;
+    flags += c.flag ? 1 : -1;
+    setUI();
+    render();
+  }
+
+  newBtn.addEventListener("click", () => reset(levelEl.value));
+  levelEl.addEventListener("change", () => reset(levelEl.value));
+
+  reset(levelEl.value);
+})();
+</script>
+</body>
+</html>
